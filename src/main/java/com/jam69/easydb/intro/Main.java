@@ -1,7 +1,7 @@
 /*
  *  Copyright &copy; Indra 2016
  */
-package com.jam69.easydb;
+package com.jam69.easydb.intro;
 
 import java.io.FileNotFoundException;
 import java.io.FileReader;

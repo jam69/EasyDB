@@ -1,37 +1,49 @@
 /*
  *  Copyright &copy; Indra 2016
  */
-package com.jam69.easydb;
+package com.jam69.easydb.simple;
 
-import com.sun.rowset.CachedRowSetImpl;
-import com.sun.rowset.JdbcRowSetImpl;
+import java.awt.RenderingHints.Key;
 import java.io.FileReader;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.sql.CallableStatement;
 import java.sql.Connection;
+import java.sql.DatabaseMetaData;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Savepoint;
 import java.sql.Statement;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.logging.Level;
+
 import javax.naming.Context;
 import javax.naming.InitialContext;
 import javax.naming.NamingException;
 import javax.sql.DataSource;
 import javax.sql.RowSet;
 import javax.sql.rowset.CachedRowSet;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import com.sun.rowset.CachedRowSetImpl;
+import com.sun.rowset.JdbcRowSetImpl;
 
 /**
  *
@@ -44,7 +56,7 @@ public class PersistenceBase
 
     private static final SimpleDateFormat df = new SimpleDateFormat("yyyy/MM/dd hh:mm:ssa");
 
-    private static Connection con;
+    private Connection con;
 
     private PrintWriter outputWriter=null;
     private FileReader dbOptionsFile=null;
@@ -58,12 +70,9 @@ public class PersistenceBase
     private int batchCount=0;
     private Statement batchStatement;
     private int batchMax=50;
-
-
-
+    
+   
     private Map<String,Savepoint> savepoints=new HashMap<>();
-
-
 
 
     public void setDBOptionsFile(FileReader reader){
@@ -186,7 +195,7 @@ public class PersistenceBase
 
     public void callProcedure(String name, Object... args)
     {
-        StringBuffer sb = new StringBuffer();
+        StringBuilder sb = new StringBuilder();
         sb.append(" call ").append(name).append("(");
         for (Object s : args)
         {
@@ -230,7 +239,7 @@ public class PersistenceBase
 
      public Object callFunction(String name, Object... args)
     {
-        StringBuffer sb = new StringBuffer();
+    	StringBuilder sb = new StringBuilder();
         sb.append(" call ").append(name).append("(");
         for (Object s : args)
         {
@@ -460,10 +469,29 @@ public class PersistenceBase
         if(s==null) return "NULL";
         return "RAWTOHEX('" + s + "')";
     }
+    
 
-    public interface SQLProcessor{
-        public void process(Object[] rs);
-    }
+     private WritableRecord compile(String insertStr) {
+    	 System.out.println("compile:["+insertStr+"]");
+         try
+         {
+             con = getConnection();
+            
+             // TODO   añadir values ? a los nombres de campo
+             PreparedStatement st = con.prepareStatement(insertStr);
+            
+             return new WritableRecord(st);
+             
+         } catch (SQLException ex)
+         {
+             log.error("compile(prepare) insert", ex);
+             return null;
+         }
+     }
+     
+
+     
+
 
     private void doQueryProcess(String queryStr,SQLProcessor p)
     {
@@ -474,7 +502,9 @@ public class PersistenceBase
             
 
             Statement st = con.createStatement();
+          
             ResultSet rs =st.executeQuery(queryStr);
+            p.begin(rs.getMetaData());
              int nFields=rs.getMetaData().getColumnCount();
             while(rs.next() ){
                Object[] rec=new Object[nFields];
@@ -483,15 +513,15 @@ public class PersistenceBase
                  }
                 p.process(rec);
             }
+            p.end();
             rs.close();
             st.close();
-           
         } catch (SQLException ex)
         {
             log.error("doQueryProcess", ex);
         }
-
     }
+    
      private void doParallelProcess(String queryStr,int n,SQLProcessor p)
     {
         try
@@ -504,6 +534,7 @@ public class PersistenceBase
             Statement st = con.createStatement();
             ResultSet rs =st.executeQuery(queryStr);
             int nFields=rs.getMetaData().getColumnCount();
+            p.begin(rs.getMetaData());
             while(rs.next() ){
                 Object[] rec=new Object[nFields];
                 for(int i=0;i<nFields;i++){
@@ -516,6 +547,7 @@ public class PersistenceBase
             }
             rs.close();
             st.close();
+            p.end();
 
         } catch (SQLException ex)
         {
@@ -529,7 +561,7 @@ public class PersistenceBase
         try
         {
            con =getConnection();
-            
+                       
             Statement st = con.createStatement();
             ResultSet rs=st.getResultSet();
             CachedRowSetImpl crs=new CachedRowSetImpl();
@@ -589,7 +621,7 @@ public class PersistenceBase
         return null;
     }
 
-    private static class DumpProcessor implements SQLProcessor{
+    private static class DumpProcessor extends AbstractSQLProcessor{
 
         private final PrintWriter out;
         
@@ -604,7 +636,7 @@ public class PersistenceBase
         @Override
         public void process(Object[] rs)
         {
-            StringBuffer sb=new StringBuffer("\t");
+            StringBuilder sb=new StringBuilder("\t");
             for (Object x: rs){
                 sb.append(x).append("\t");
             }
@@ -620,9 +652,8 @@ public class PersistenceBase
     }
 
     public class Insert {
-        private final StringBuffer sb=new StringBuffer();
+        private final StringBuilder sb=new StringBuilder();
 
-       
         public Insert insert(String table){
             sb.append("INSERT INTO ").append(table).append(" (");
             return this;
@@ -651,9 +682,160 @@ public class PersistenceBase
             sb.append(blob(s)).append(",");
             return this;
         }
-        public void end(){
+        public void save(){
             sb.deleteCharAt(sb.length()-1);
             sb.append(")");
+            doIt(sb.toString());
+        }
+        public WritableRecord compile(){
+            sb.deleteCharAt(sb.length()-1);
+            sb.append(")");
+            return PersistenceBase.this.compile(sb.toString());
+        }
+        
+    }
+    
+    public class FieldDescriptor {
+    	private final String name;
+    	private final int type;
+    	private final int pos;
+    	
+    	public FieldDescriptor(String name,int type,int pos) {
+    		this.name=name;
+    		this.type=type;
+    		this.pos=pos;
+    	}
+    	
+    	public String getName() {
+    		return name;
+    	}
+    	
+    	public int getType() {
+    		return type;
+    	}
+    	
+    	public int getPos() {
+    		return pos;
+    	}
+    }
+    
+    public class WritableRecord {
+    	
+    	private final PreparedStatement stmt;
+    	private Map<String,FieldDescriptor> dc;
+    	
+    	public WritableRecord(PreparedStatement stmt) {
+    		this.stmt=stmt;
+    		
+    		try {
+				dc=new HashMap<>();
+				 ResultSetMetaData meta = stmt.getMetaData();
+				 for(int i=0;i<meta.getColumnCount();i++) {
+					 FieldDescriptor fd=new FieldDescriptor(meta.getColumnName(i),meta.getColumnType(i),i+1);
+					 dc.put(fd.getName(),fd);
+				 }
+			} catch (SQLException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+    	}
+    	
+    	public WritableRecord set(int ndx, int value) {
+    		try {
+				stmt.setInt(ndx, value);
+			} catch (SQLException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+    		return this;
+    	}
+    	
+    	public WritableRecord set(int ndx, String value) {
+    		try {
+				stmt.setString(ndx, value);
+			} catch (SQLException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+    		return this;
+    	}
+    	public WritableRecord set(String fieldName, int value) {
+    		try {
+    			int ndx=dc.get(fieldName).getPos();
+				stmt.setInt(ndx, value);
+			} catch (SQLException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+    		return this;
+    	}
+    	
+    	public WritableRecord set(String fieldName, String value) {
+    		try {
+    			int ndx=dc.get(fieldName).getPos();
+				stmt.setString(ndx, value);
+			} catch (SQLException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+    		return this;
+    	}
+    	
+    	public WritableRecord insert(Object[] data) {
+    		try {
+    			for(int i=0;i<data.length;i++) {
+    				stmt.setObject(i+1, data[i]);
+    			}
+    			save();
+			} catch (SQLException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+    		return this;
+    	}
+    	
+    	public WritableRecord save() {
+    		try {
+    			if(batchMode){
+                    if(batchCount>=batchMax){
+                        int[]res=batchStatement.executeBatch();
+                        checkBatchResult(res);
+                        batchCount=0;
+                    }
+                    stmt.addBatch();
+                    batchCount++;
+                }else{
+                	stmt.executeUpdate();
+                }
+			} catch (SQLException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+    		return this;
+    	}
+    	
+    }
+    
+    public Delete newDelete(String table){
+        Delete q =new Delete();
+        return q.delete(table);
+    }
+
+    public class Delete {
+        private final StringBuilder sb=new StringBuilder();
+
+        public Delete delete(String table){
+            sb.append("DELETE ").append(table).append(" FROM ");
+            return this;
+        }
+        public void where(String condition){
+            sb.deleteCharAt(sb.length()-1);
+            sb.append(" WHERE ").append(condition);
+            doIt(sb.toString());
+        }
+        public void where(String fmt,Object[] args){
+            sb.deleteCharAt(sb.length()-1);
+            sb.append(" WHERE ").append(String.format(fmt, args));
             doIt(sb.toString());
         }
     }
@@ -664,7 +846,7 @@ public class PersistenceBase
     }
 
     public class Update {
-        private final StringBuffer sb=new StringBuffer();
+        private final StringBuilder sb=new StringBuilder();
 
         public Update update(String table){
             sb.append("UPDATE ").append(table).append(" SET ");
@@ -698,24 +880,34 @@ public class PersistenceBase
         }
     }
 
+    public Select newSelect(){
+        Select q =new Select();
+        return q.select();
+    }
+    
     public Select newSelect(String fields){
         Select q =new Select();
         return q.select(fields);
     }
-
+    
+    
     public class Select {
-        private final StringBuffer sb=new StringBuffer();
+    	
+        private final StringBuilder sb=new StringBuilder();
 
         public Select select(String fields){
             sb.append("SELECT ").append(fields);
             return this;
         }
-        public Select from(String table){
-            sb.append(" FROM ").append(table);
+        public Select select(){
+            return this;
+        }
+        public Select from(String tableName){
+       		sb.append(" FROM ").append(tableName);
             return this;
         }
         public Select where(String condition){
-            sb.append(" WHERE ").append(condition);
+       		sb.append(" WHERE ").append(condition);
             return this;
         }
         public void dump(){
@@ -736,9 +928,10 @@ public class PersistenceBase
         public CachedRowSet cachedRowSet(){
             return doCachedRowSet(sb.toString());
         }
+
     }
 
-    public class Result implements Iterator {
+    public class Result implements Iterator<Record> {
 
         private final ResultSet rs;
 
@@ -760,7 +953,7 @@ public class PersistenceBase
         }
 
         @Override
-        public Object next()
+        public Record next()
         {
             return new Record(rs);
         }
